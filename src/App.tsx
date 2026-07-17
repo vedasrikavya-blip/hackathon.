@@ -89,7 +89,8 @@ export default function App() {
 
   // Function to call Gemini Live LLM
   const fetchLivePathway = async (apiKey: string, promptText: string, level: string): Promise<PathwayData> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
+    const models = ['gemini-3.5-flash', 'gemini-3.1-flash', 'gemini-2.5-flash'];
+    let lastError: any = null;
     
     const systemPrompt = `You are the IDEA Multi-Agent Orchestrator. The user wants to learn about: "${promptText}" at level: "${level}".
     Create a complete structured curriculum. Return a JSON response adhering to the exact typescript schema. Do not wrap in markdown tags or \`\`\`json blocks.
@@ -109,31 +110,46 @@ export default function App() {
       "quiz": [{ "question": string, "options": string[], "answerIndex": number, "explanation": string }]
     }`;
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: `${systemPrompt}\n\n${schemaPrompt}` }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
+    for (const model of models) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `${systemPrompt}\n\n${schemaPrompt}` }] }],
+            generationConfig: {
+              responseMimeType: 'application/json',
+            }
+          })
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`API Error: ${response.status} - ${errText}`);
         }
-      })
-    });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`API Error: ${response.status} - ${errText}`);
+        const data = await response.json();
+        const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!resultText) {
+          throw new Error('Empty response from AI model');
+        }
+
+        let cleanedText = resultText.trim();
+        if (cleanedText.startsWith('```')) {
+          cleanedText = cleanedText.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+        }
+
+        return JSON.parse(cleanedText) as PathwayData;
+      } catch (err: any) {
+        console.warn(`Model ${model} failed:`, err);
+        lastError = err;
+      }
     }
 
-    const data = await response.json();
-    const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!resultText) {
-      throw new Error('Empty response from AI model');
-    }
-
-    return JSON.parse(resultText) as PathwayData;
+    throw lastError || new Error('All models failed to generate content.');
   };
 
   // Handle pathway generation triggers
@@ -172,6 +188,8 @@ export default function App() {
         const errMsg = String(err.message || err);
         if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid') || errMsg.includes('INVALID_ARGUMENT')) {
           friendlyMsg = 'Invalid Gemini API Key. Please configure a valid key in the left sidebar. Falling back to offline synthesis...';
+        } else if (errMsg.includes('503') || errMsg.includes('overloaded') || errMsg.includes('Service Unavailable')) {
+          friendlyMsg = 'Gemini model is currently overloaded (503). Retrying fallback models... Falling back to local offline synthesis...';
         } else {
           friendlyMsg = `API Error: ${errMsg.slice(0, 80)}... Falling back to local synthesis...`;
         }
